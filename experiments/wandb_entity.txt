@@ -1,0 +1,2 @@
+# Set your W&B entity here (first non-comment line is used).
+your-wandb-entity

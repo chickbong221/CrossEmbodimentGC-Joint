@@ -1,0 +1,31 @@
+#! /bin/bash
+
+python experiment.py \
+    --algorithm.name="uni_td3bc_eg.td3bc" \
+    --algorithm.nr_offline_updates=100000 \
+    --algorithm.batch_size=1024 \
+    --algorithm.actor_lr=3e-4 \
+    --algorithm.critic_lr=3e-4 \
+    --algorithm.max_grad_norm=5.0 \
+    --algorithm.evaluation_episodes=1 \
+    --algorithm.evaluation_frequency=100 \
+    --algorithm.save_latest_frequency=10000 \
+    --algorithm.determine_fastest_cpu_for_gpu=False \
+    --algorithm.device="gpu" \
+    --algorithm.dataset_path='data/offline_data/all_robots_expert_forward_1m' \
+    --algorithm.M=4 \
+    --environment.name="multi_robot_offline" \
+    --environment.nr_envs=16 \
+    --environment.async_skip_percentage=0.0 \
+    --environment.cycle_cpu_affinity=True \
+    --environment.seed=0 \
+    --environment.nr_eval_envs=16 \
+    --environment.test_command_path='command_forward.txt' \
+    --runner.mode="train" \
+    --runner.track_console=False \
+    --runner.track_tb=True \
+    --runner.track_wandb=True \
+    --runner.save_model=True \
+    --runner.wandb_entity="your-wandb-entity" \
+    --runner.project_name="cross-embodiment-offline" \
+    --runner.exp_name="E0"

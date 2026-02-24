@@ -1,0 +1,8 @@
+from rl_x.algorithms.algorithm_manager import extract_algorithm_name_from_file, register_algorithm
+from cross_embodiment_offline_rl.algorithms.uni_td3bc_eg.td3bc.td3bc import TD3BC
+from cross_embodiment_offline_rl.algorithms.uni_td3bc_eg.td3bc.default_config import get_config
+from cross_embodiment_offline_rl.algorithms.uni_td3bc_eg.td3bc.general_properties import GeneralProperties
+
+
+TD3BC_FLAX = extract_algorithm_name_from_file(__file__)
+register_algorithm(TD3BC_FLAX, get_config, TD3BC, GeneralProperties)

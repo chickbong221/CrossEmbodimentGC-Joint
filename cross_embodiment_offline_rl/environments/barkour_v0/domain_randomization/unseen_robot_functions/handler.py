@@ -1,0 +1,11 @@
+from cross_embodiment_offline_rl.environments.barkour_v0.domain_randomization.unseen_robot_functions.default import DefaultDomainUnseenRobotFunction
+from cross_embodiment_offline_rl.environments.barkour_v0.domain_randomization.unseen_robot_functions.none import NoneDomainUnseenRobotFunction
+
+
+def get_domain_randomization_unseen_robot_function(name, env, **kwargs):
+    if name == "default":
+        return DefaultDomainUnseenRobotFunction(env, **kwargs)
+    elif name == "none":
+        return NoneDomainUnseenRobotFunction(env, **kwargs)
+    else:
+        raise NotImplementedError
