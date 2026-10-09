@@ -10,3 +10,6 @@ multi_render.txt
 runs/
 experiments/stderr*
 experiments/stdout*
+# large analysis dumps and scratch
+experiments/analysis/results/**/*.npz
+tmp/

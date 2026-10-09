@@ -1,0 +1,438 @@
+% MORSE manuscript draft (2026-10-04, joint groups and results added 2026-10-09). Uses the parent paper's preamble;
+% added references are in morse_new_refs.bib. The tables need, in the preamble:
+%   \usepackage{booktabs}
+%   \usepackage{colortbl}                    % \rowcolor, \columncolor (works with the xcolor that CVPR loads)
+%   \definecolor{egbg}{RGB}{221,235,247}     % light blue: EG
+%   \definecolor{ourbg}{RGB}{255,228,196}    % light orange: MORSE
+%   \newcommand{\tabse}[1]{\,{\scriptsize$\pm$#1}}   % "± SE" after a value
+% [X] marks results to be filled in from the final experiments.
+
+\begin{abstract}
+Cross-embodiment offline reinforcement learning (RL) trains a single control policy on pooled datasets from many
+robots, exploiting both expert and abundant suboptimal trajectories. As the proportion of suboptimal data and the
+diversity of robots grow, however, the gradients of different robots increasingly conflict and impede learning, most
+severely for robots whose morphology differs from the majority. Existing remedies operate on whole robots, while every
+joint of every robot is still computed by the same parameters. In this work, we argue that parameter sharing should be
+decided at the level of joints, since two robots may benefit from sharing the computation of their knees while their
+hips and ankles require different computation. We propose Morphology-aware Routing of Shared Experts (MORSE), which
+replaces layers of the joint encoder, the whole-body core, and the action decoder of a morphology-agnostic policy with
+mixtures of experts shared across robots. A router conditioned on the morphology and state of each joint selects a few
+experts for that joint in the encoder and the decoder, so that every joint has its own path from its observation to its
+action, and two joints share computation only through the experts they both select. A mutual-information objective
+between groups of similar joints and experts lets joints of the same kind rely on the same experts across robots and
+keeps all experts in use. On a cross-embodiment offline RL benchmark spanning 16 legged robots, [X].
+\end{abstract}
+
+% =====================================================================================================================
+\section{Introduction}
+\label{sec:intro}
+% =====================================================================================================================
+
+Training a single model on large and diverse data has driven much of the recent progress in machine learning, and
+robot learning is following the same path. Cross-embodiment learning pools trajectories from many robots to train one
+policy that controls all of them, so that experience collected on one platform benefits the
+others~\citep{oxe2024,octo2024}. For robots whose bodies differ in the number and arrangement of their joints,
+morphology-agnostic policies make this possible by processing every joint with shared modules, conditioned on a
+description of the body~\citep{huang2020smp,gupta2022metamorph,bohlinger2024onepolicy}. Offline reinforcement learning
+(RL) further broadens the data that such a policy can use, from expert demonstrations to the abundant suboptimal
+trajectories that are far cheaper to collect~\citep{levine2020offline,kostrikov2022iql}, and its combination with
+cross-embodiment learning has recently been shown to pre-train locomotion policies for many legged
+robots~\citep{abe2026crossembodimentoffline}.
+
+Robot bodies, however, are alike in some parts and different in others. The knees of a quadruped and of a humanoid
+bend in similar ways and may benefit from shared control, whereas the hip of the quadruped and the ankle of the
+humanoid serve different purposes, and even within one robot, the joints of a leg play distinct roles in the gait. A
+cross-embodiment policy should therefore share computation between joints that are alike and keep it apart between
+joints that differ. Morphology-agnostic policies, in contrast, process every joint of every robot with the same
+parameters, so that the update made for one joint changes the computation of all others.
+
+This full sharing becomes a limitation when the data of different robots pull the shared parameters in different
+directions. \citet{abe2026crossembodimentoffline} found that, as the proportion of suboptimal data and the number of
+robot types grow, the policy gradients of different robots conflict more often, which induces negative transfer and
+stalls the learning of robots with few similar embodiments, such as bipeds trained alongside many quadrupeds. Existing
+remedies operate on whole robots: gradient surgery projects the conflicting gradients of different
+robots~\citep{yu2020pcgrad}, and Embodiment Grouping updates the policy one group of morphologically similar robots at a
+time~\citep{abe2026crossembodimentoffline}. Yet the gradient of a robot is a sum of contributions from its joints, so a
+conflict between two robots mixes pairs of joints that disagree with pairs that agree, and remedies that treat each
+robot as a whole cannot separate them. Specializing computation below the level of whole robots has proven useful
+for universal morphology control with limb-specific parameters~\citep{xiong2023modumorph} and for modular robots with
+module-wise experts~\citep{liu2026m2oe}, which suggests deciding the sharing for every joint.
+
+To this end, we introduce MORSE (\emph{Morphology-aware Routing of Shared Experts}), a cross-embodiment policy that
+learns parameter sharing at the joint level with sparse mixtures of experts
+(MoE)~\citep{shazeer2017outrageously,fedus2022switch}. MORSE replaces layers of the joint encoder, the whole-body core,
+and the action decoder of a morphology-agnostic policy~\citep{bohlinger2024onepolicy} with mixtures of experts shared
+across robots, and a router that reads the morphology descriptor and the state of each joint selects a few experts for
+that joint in the encoder and the decoder. Every joint thus encodes its observation and predicts its action with its
+own experts. Because the
+routing is sparse, the actor gradient of a joint reaches only the experts it selects: joints whose updates conflict can
+be served by different experts, while corresponding joints of similar robots can select the same experts and transfer
+what they learn (Fig.~\ref{fig:teaser}). A mutual-information objective between groups of joints with similar
+intrinsic properties and experts~\citep{chen2023modsquad} lets joints of the same kind rely on the same experts across
+robots and keeps all experts in use.
+Our main contributions are summarized as follows:
+\begin{itemize}
+\item We show that the gradient conflicts between
+robots in a morphology-agnostic policy decompose into interactions between pairs of joints, and that sparse routing
+confines these interactions to the experts that two joints both select.
+\item We propose MORSE, in which every joint of every robot
+selects shared experts in the joint encoder and the action decoder according to its morphology and state, so that
+every joint learns its own path from its observation to its action, and parameter sharing is decided joint by joint
+rather than robot by robot.
+\item We evaluate MORSE on the benchmark
+of~\citet{abe2026crossembodimentoffline} with 16 legged robots against robot-level grouping, gradient surgery, and
+task grouping, and analyze which joints share experts across robots.
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\fbox{\rule{0pt}{1.4in}\rule{0.95\linewidth}{0pt}}
+\caption{Learning to share at the joint level. Robot-level remedies update or group whole robots, so all joints share
+the same parameters. MORSE lets every joint select experts from pools shared across robots: corresponding joints of
+different robots can share experts, while other joints specialize. The selection depends on the morphology and state
+of each joint.}
+\label{fig:teaser}
+\end{figure}
+
+% =====================================================================================================================
+\section{Related Work}
+\label{sec:related}
+% =====================================================================================================================
+
+\subsection{Cross-Embodiment Learning}
+Cross-embodiment learning trains a single policy on data from multiple robots so that control knowledge transfers
+across platforms. Large-scale efforts pool manipulation data from many robots~\citep{oxe2024,octo2024}, usually with
+embodiment-specific input and output modules. For robots whose joints and limbs differ in number and arrangement,
+morphology-agnostic policies instead share their modules across joints or limbs, using graph
+networks~\citep{wang2018nervenet,huang2020smp}, transformers over limbs~\citep{kurin2021amorpheus,gupta2022metamorph},
+or attention over joint descriptors, as in URMA~\citep{bohlinger2024onepolicy}, which controls many legged robots with
+one network. We build on URMA because the cross-embodiment offline RL benchmark~\citep{abe2026crossembodimentoffline}
+adopts it, which lets us compare directly with the established baselines. In these architectures, every joint of every
+robot is computed by the same parameters. To specialize computation below the level of whole robots,
+ModuMorph~\citep{xiong2023modumorph} generates the input and output layers of every limb with a hypernetwork
+conditioned on the morphology of the limb, and M2oE~\citep{liu2026m2oe} selects experts for each module of a modular
+robot with an attention-based gate. In ModuMorph, all limb-specific parameters are produced by one shared hypernetwork,
+so the updates of all limbs still meet in its weights, and the generated parameters do not depend on the state; M2oE
+addresses the reconfigurations of a modular robot. MORSE targets cross-embodiment offline RL over heterogeneous robots,
+where the interference between robots grows with the share of suboptimal
+data~\citep{abe2026crossembodimentoffline}. Every joint of every robot selects a few experts from pools shared across
+robots, conditioned on its morphology and state, so that two joints share expert parameters only when they select the
+same experts, and the selection covers both the joint encoder and the action decoder.
+
+\subsection{Gradient Conflicts and Parameter Sharing}
+When several tasks share a network, their gradients can conflict and cause negative transfer. Multi-task optimization
+methods modify the gradients of conflicting tasks, by projecting each onto the normal plane of the
+others~\citep{yu2020pcgrad}, by seeking a conflict-averse direction near the average gradient~\citep{liu2021cagrad},
+or by bargaining between tasks~\citep{navon2022nashmtl}, and task-grouping methods decide which tasks are updated
+together~\citep{standley2020which,fifty2021tag,jeong2025sel}. In cross-embodiment offline RL,
+\citet{abe2026crossembodimentoffline} measured conflicts between the actor gradients of different robots and
+introduced Embodiment Grouping (EG), which clusters robots by the distance between their morphology graphs and updates
+the actor one cluster at a time. These methods keep a single set of parameters shared by all tasks and change only how
+or when it is updated. Other methods change which parameters the tasks share: Recon turns the layers with the most
+conflicts into task-specific layers~\citep{shi2023recon}, and HarmoDT learns a parameter mask for every task in
+multi-task offline RL~\citep{hu2024harmodt}. Both assign parameters to whole tasks identified by their index. MORSE
+instead decides the sharing for every joint, learns it end to end from the actor loss without estimating pairwise
+gradient conflicts, and conditions it on morphology descriptors rather than task indices, so that corresponding joints
+of different robots can share parameters while the joints of one robot can use different ones.
+
+\subsection{Mixtures of Experts}
+Sparse mixtures of experts (MoE) route every input to a few experts of a large network and have scaled language and
+vision models at a constant cost per
+input~\citep{shazeer2017outrageously,lepikhin2021gshard,fedus2022switch,riquelme2021vmoe}. In multi-task learning,
+experts shared across tasks are selected by task-dependent gates, so that
+related tasks use common experts while unrelated tasks use different ones~\citep{ma2018mmoe,chen2023modsquad}, and in
+RL, modules and experts are composed per task for multi-task
+manipulation~\citep{yang2020softmodularization,sodhani2021care,sun2022paco,hendawy2024moore} or selected from the
+state of a single legged robot across terrains and gaits~\citep{huang2025moeloco}. Experts have also been used to
+separate conflicting gradients: STGC detects the tokens of a vision-language model whose gradients conflict within
+their expert and reroutes them to other experts~\citep{yang2025stgc}. In these works, the units of routing are tokens,
+states, or tasks within a single model or robot. MORSE introduces routing at the level of joints across embodiments.
+The joints of different robots select experts according to their morphology and state, so that corresponding joints
+of different robots can share experts while the joints of one robot can use different ones, and every joint selects
+its own experts in both the joint encoder and the action decoder. The sharing of parameters thus becomes
+a learned decision for every pair of joints, which MORSE obtains end to end from the actor loss, without estimating
+gradients.
+
+% =====================================================================================================================
+\section{Preliminaries}
+\label{sec:prelim}
+% =====================================================================================================================
+
+\paragraph{Problem setting.}
+We consider a set $\mathcal{R}$ of robots with different morphologies. Robot $r$ has actuated joints $\mathcal{J}_r$
+and feet $\mathcal{F}_r$, and every joint $j$ and foot $f$ has a fixed-length descriptor $d_j$ or $d_f$ derived from
+the robot's model, such as the position, rotation axis, and actuation limits of a joint; we write $m_r$ for the
+descriptors of robot $r$. A state $s$ comprises local observations $o_j$ and $o_f$ of the joints and feet and general
+observations $o^{\mathrm{g}}$, such as the velocity of the base and the command, and an action
+$a=(a_j)_{j\in\mathcal{J}_r}$ sets a target for every joint. Following \citet{abe2026crossembodimentoffline}, we learn
+a single policy $\pi_\theta(a\mid s,m_r)$ from a pooled offline dataset
+$\mathcal{D}=\bigcup_{r\in\mathcal{R}}\mathcal{D}_r$ of mixed quality, with every robot contributing equally to the
+actor loss:
+\begin{equation}
+\mathcal{L}(\theta)=\sum_{r\in\mathcal{R}}\mathcal{L}_r(\theta),\qquad
+\mathcal{L}_r(\theta)=\frac{1}{|\mathcal{R}|\,n}\sum_{i\in\mathcal{B}_r}\ell_i(\theta),
+\label{eq:actor_loss}
+\end{equation}
+where $\mathcal{B}_r$ holds $n$ transitions of robot $r$ and $\ell_i$ is the per-sample actor loss of the base
+learner, such as the advantage-weighted log-likelihood of IQL~\citep{kostrikov2022iql}.
+
+\paragraph{Morphology-agnostic policy.}
+URMA~\citep{bohlinger2024onepolicy} encodes the local observation of every joint and foot with its descriptor and
+aggregates them, together with $o^{\mathrm{g}}$, into a vector $x$ of fixed size. A whole-body core $C$ maps $x$ to a
+representation $z$, which a decoder $D$, shared by all joints, turns into the action mean of every joint:
+\begin{equation}
+x=A(s,m_r),\qquad z=C(x),\qquad \mu_j=D(z,c_j),
+\label{eq:urma}
+\end{equation}
+where $A$ denotes the encoders and the aggregation, and $c_j$ holds the local encoding $z^{\mathrm{loc}}_j$ of joint
+$j$ and an embedding of its descriptor. Every joint of every robot thus reads the same representation $z$ and is
+decoded by the same network $D$.
+
+\paragraph{Gradient conflicts between robots.}
+Let $\phi$ denote the parameters of $C$ and $D$. Their gradient for robot $r$ is a sum of contributions from its
+joints, $g_r=\nabla_\phi\mathcal{L}_r=\sum_{u\in\mathcal{U}_r}g_u$, where $\mathcal{U}_r=\mathcal{B}_r\times
+\mathcal{J}_r$ pairs every transition of robot $r$ with every joint and $g_u=(\partial\ell_i/\partial\mu_j)\,
+\nabla_\phi\mu_j$ for $u=(i,j)$. The inner product with which \citet{abe2026crossembodimentoffline} measure the
+conflict between two robots therefore decomposes over pairs of joints,
+\begin{equation}
+\bigl\langle g_r,g_{r'}\bigr\rangle=\sum_{u\in\mathcal{U}_r}\sum_{v\in\mathcal{U}_{r'}}\bigl\langle g_u,g_v\bigr\rangle,
+\label{eq:conflict}
+\end{equation}
+so a conflict between two robots mixes pairs of joints that disagree with pairs that agree, and remedies that project,
+reweight, or regroup the gradients of whole robots act on these sums as a whole.
+
+% =====================================================================================================================
+\section{Morphology-aware Routing of Shared Experts}
+\label{sec:method}
+% =====================================================================================================================
+
+MORSE turns the shared networks of Eq.~\eqref{eq:urma}, the joint encoder, the whole-body core $C$, and the action
+decoder $D$, into mixtures of $K$ experts that are shared across robots. In the joint encoder and the decoder, every
+joint selects $k$ experts; in the core, every state does. The selection is made by routers that read the morphology
+and the state, so that joints with similar roles can select the same experts while other joints use different ones,
+and a mutual-information objective between groups of similar joints and experts keeps the selection consistent across
+robots and all experts in use. The aggregation and the prediction of the action standard deviation remain as in URMA,
+so that MORSE is a drop-in replacement for the encoder, the core, and the decoder. Figure~\ref{fig:overview} gives an
+overview.
+
+\begin{figure*}[t]
+\centering
+\fbox{\rule{0pt}{1.6in}\rule{0.95\textwidth}{0pt}}
+\caption{Overview of MORSE. Every joint encodes its observation with the experts selected by the router of the joint
+encoder, and predicts its action mean with the decoder experts selected by a second router. Both routers read the
+morphology and the state of the joint. The core experts are selected for every state and compute the whole-body
+representation $z$ once per state. Joints of the same group are encouraged to select the same experts, and all experts
+and routers are shared across robots.}
+\label{fig:overview}
+\end{figure*}
+
+\subsection{Joint-Level Experts}
+\label{sec:experts}
+
+A sparse mixture-of-experts layer outputs a weighted sum of $K$ experts, whose weights come from a router that keeps
+only the $k$ largest weights and sets the others to zero~\citep{shazeer2017outrageously}. Following
+Mod-Squad~\citep{chen2023modsquad}, MORSE turns every second layer of the joint encoder and of the core into such a
+layer, and replaces the action decoder with $K$ decoder experts. As in DeepSeekMoE~\citep{dai2024deepseekmoe}, one
+expert of every layer is shared: it is used with weight one and holds the computation that all inputs need, while the
+router selects $k$ of the other experts, which can then specialize. MORSE applies the layers of the joint encoder and
+the decoder to every joint separately. The action mean of joint $j$ is produced by the decoder experts $D_e$, mixed
+with the weights $G_{\mathrm{D}}(j)$ of the decoder router:
+\begin{equation}
+\mu_j=\sum_{e=1}^{K}G^e_{\mathrm{D}}(j)\,D_e(z,c_j),
+\label{eq:decoder}
+\end{equation}
+with $c_j$ as in Eq.~\eqref{eq:urma}, except that every decoder expert embeds the descriptor of the joint itself. The
+expert layers of the joint encoder mix their experts in the same way, with weights given for every joint by their own
+routers. Separate routers for the encoder and the decoder let joints share how they encode their observations while
+acting through different decoders, and vice versa, and together they give every joint its own sparse path from its
+observation to its action. In the core, which computes the whole-body representation $z$ once per state, the experts
+are selected for the state, so that robots with different bodies can use different core experts.
+
+\subsection{Routing from Morphology and State}
+\label{sec:routing}
+
+The router of expert layer $b$ is shared by all joints of all robots. It scores the routed experts from the morphology
+and the state of the joint and keeps the $k$ most probable ones:
+\begin{equation}
+\begin{aligned}
+h_b(j)&=\psi^{\mathrm{m}}_b\bigl(d_j,\bar d_r\bigr)+\psi^{\mathrm{s}}_b\bigl(s^b_j\bigr),\\
+G_b(j)&=\operatorname{TopK}\bigl(\operatorname{Softmax}(h_b(j))\bigr),
+\end{aligned}
+\label{eq:router}
+\end{equation}
+where TopK keeps the $k$ largest entries and sets the others to zero.
+The morphology branch $\psi^{\mathrm{m}}_b$ reads the descriptor $d_j$ of the joint together with a descriptor
+$\bar d_r$ of its robot, formed from the mean joint and foot descriptors and the numbers of joints and feet. Because
+all descriptors share one format, corresponding joints of different robots, such as the knees of two quadrupeds,
+receive similar descriptors, and this branch gives them similar preferences over experts. The state branch
+$\psi^{\mathrm{s}}_b$ reads $s^b_j=o_j$ in the encoder and $s^b_j=[z,z^{\mathrm{loc}}_j]$ in the decoder, which lets a
+joint adjust its selection to its situation, for example between stance and swing. In the core, which routes a state
+rather than a joint, the morphology branch reads only $\bar d_r$ and the state branch reads the input of the layer.
+Both branches are two-layer perceptrons whose output layers start from small random weights, so that different joints
+begin with different expert sets, and during training, learned Gaussian noise is added to the scores as in
+Mod-Squad~\citep{chen2023modsquad}. Because the routing is sparse, the actor gradient of a joint reaches only the shared
+expert and the experts it selects, so that joints whose updates conflict can be served by different experts, while
+corresponding joints of
+similar robots can share experts and transfer what they learn (Sec.~\ref{sec:analysis}).
+
+\subsection{Mutual Information between Joint Groups and Experts}
+\label{sec:mi}
+
+For experts to specialize, joints that play the same role should rely on the same experts, in every robot and across
+states, and all experts should be used. We encode both requirements in the mutual information between groups of joints
+and experts~\citep{chen2023modsquad}. We form the groups once, before training, from the intrinsic properties of the
+joints. From the descriptor of every joint, we take its rotation axis, number of child joints, nominal position, torque
+and velocity limits relative to the largest of its robot, damping, armature, stiffness, friction, and range, in a form
+that is the same for the left and right counterparts of a joint, and cluster the joints of all robots into eight groups
+with $k$-means on the standardized properties. Because these properties are local to the joint, joints of different
+robots can fall into the same group.
+
+Let $t=(r,j)$ index the joints of all robots, $y_t$ be the group of joint $t$, and
+$p_{b,i}(j)=\operatorname{Softmax}(h_b(j))$ be the routing probabilities of joint $j$ in transition $i$ before the
+top-$k$ selection. For layer $b$, we estimate the probability that joint $t$ uses expert $e$ from the transitions
+$\mathcal{B}_r$ of its robot in a minibatch, and weight all robots equally and the joints of a robot equally:
+\begin{equation}
+P_b(e\mid t)=\frac{1}{|\mathcal{B}_r|}\sum_{i\in\mathcal{B}_r}p^e_{b,i}(j),\qquad
+P(t)=\frac{1}{|\mathcal{R}|\,|\mathcal{J}_r|}.
+\label{eq:routing_marginals}
+\end{equation}
+Group $y$ then has the probability $P(y)=\sum_{t:y_t=y}P(t)$ and uses expert $e$ with the probability
+$P_b(e\mid y)=\sum_{t:y_t=y}P(t)\,P_b(e\mid t)/P(y)$, and the marginal is $P_b(e)=\sum_yP(y)\,P_b(e\mid y)$. The mutual
+information between the group $Y$ and the expert $E$,
+\begin{equation}
+I_b(Y;E)=\sum_{y,e}P(y)\,P_b(e\mid y)\log\frac{P_b(e\mid y)}{P_b(e)},
+\label{eq:mi}
+\end{equation}
+is high when the joints of every group concentrate on a few experts, across robots and states, while all experts are
+used. In the core, which routes states, the robot takes the place of the group, with $P(r)=1/|\mathcal{R}|$. Because
+the objective uses the probabilities of all routed experts, it also guides the scores of the experts that a joint does
+not currently select.
+
+\subsection{Training and Inference}
+\label{sec:training}
+
+MORSE is trained by adding the mutual information of all expert layers and a load-balancing term to the actor loss of
+the base learner,
+\begin{equation}
+\mathcal{L}_{\mathrm{train}}=\mathcal{L}-\lambda\sum_bI_b(Y;E)+\beta\sum_b\operatorname{KL}\bigl(\bar p_b\,\|\,u\bigr),
+\label{eq:train}
+\end{equation}
+where $\mathcal{L}$ is the actor loss of Eq.~\eqref{eq:actor_loss}, $\bar p_b$ is the routing probability of layer $b$
+averaged over the minibatch with equal weight for every robot, $u$ is the uniform distribution over the routed
+experts, and $\lambda$ and $\beta$ weigh the two regularizers. The load-balancing term keeps every layer from relying
+on a few experts~\citep{shazeer2017outrageously,fedus2022switch}. The regularizers are computed on all transitions of
+every actor minibatch, and the critics keep the architecture and the losses of the base learner. At inference, the
+routers use their scores without noise, every joint mixes the outputs of the experts selected for it, and the
+regularizers are used only during training.
+
+% =====================================================================================================================
+\section{Experiments}
+\label{sec:experiments}
+% =====================================================================================================================
+
+\subsection{Setup}
+\label{sec:setup}
+
+We evaluate on the cross-embodiment offline RL benchmark of~\citet{abe2026crossembodimentoffline}, which pools the data
+of 16 legged robots, nine quadrupeds, six bipeds, and a hexapod, in six datasets: Expert, Expert Replay, and 70\%
+Suboptimal, each in a forward and a backward variant. We compare with the base learners BC,
+TD3+BC~\citep{fujimoto2021minimalist}, and IQL~\citep{kostrikov2022iql}, with IQL combined with task grouping
+(SEL)~\citep{jeong2025sel} or gradient surgery (PCGrad)~\citep{yu2020pcgrad}, and with Embodiment Grouping (EG) on all
+three base learners, using the results reported by~\citet{abe2026crossembodimentoffline}. MORSE builds on
+URMA~\citep{bohlinger2024onepolicy} with $K=16$ experts per layer, one of them shared, and $k=3$. We set $\beta=10^{-2}$ and $\lambda=5\cdot10^{-4}$, which is switched on after 10k
+updates and ramped in over 5k updates. Since EG takes one optimizer step for each of its four groups in every update,
+MORSE takes four actor steps per update. Every 100 updates, we evaluate one episode per robot; for MORSE, we report the
+evaluation with the highest mean return after 50k updates [X: one seed so far].
+
+\subsection{Main Results}
+\label{sec:results}
+
+\begin{table*}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\caption{Mean return over the 16 robots on the six datasets. The results of the baselines and of EG (blue) are those
+of~\citet{abe2026crossembodimentoffline} (mean $\pm$ standard error over five seeds); MORSE is shown in orange. The best
+result of each column is in bold.}
+\label{tab:main}
+\begin{tabular}{lccccccc}
+\toprule
+ & \multicolumn{2}{c}{Expert} & \multicolumn{2}{c}{Expert Replay} & \multicolumn{2}{c}{70\% Suboptimal} & \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+Method & Forward & Backward & Forward & Backward & Forward & Backward & Mean \\
+\midrule
+BC & 63.31\tabse{0.10} & 67.17\tabse{0.01} & 49.71\tabse{1.06} & 42.87\tabse{1.32} & 30.52\tabse{3.10} & 41.42\tabse{0.71} & 49.17 \\
+TD3+BC & 52.14\tabse{1.89} & 47.94\tabse{0.48} & 55.66\tabse{0.84} & 52.31\tabse{1.22} & 35.74\tabse{1.51} & 34.79\tabse{1.40} & 46.43 \\
+IQL & 63.39\tabse{0.05} & 67.10\tabse{0.01} & 54.61\tabse{0.12} & 51.86\tabse{1.56} & 36.62\tabse{1.02} & 38.69\tabse{0.89} & 52.05 \\
+IQL + SEL & 63.37\tabse{0.07} & \textbf{67.24}\tabse{0.02} & 55.01\tabse{0.55} & 55.73\tabse{1.06} & 44.59\tabse{2.02} & 44.45\tabse{1.75} & 55.07 \\
+IQL + PCGrad & 63.37\tabse{0.04} & 67.05\tabse{0.02} & 53.84\tabse{0.67} & 55.94\tabse{1.14} & 39.63\tabse{1.95} & 41.04\tabse{1.10} & 53.48 \\
+\midrule
+\rowcolor{egbg} BC + EG & 63.47\tabse{0.04} & \textbf{67.24}\tabse{0.02} & 51.89\tabse{0.65} & 48.64\tabse{2.65} & 42.99\tabse{1.23} & 46.30\tabse{2.39} & 53.42 \\
+\rowcolor{egbg} TD3+BC + EG & 59.34\tabse{1.19} & 51.98\tabse{1.26} & \textbf{57.04}\tabse{0.46} & 55.67\tabse{1.30} & 43.41\tabse{1.54} & 40.88\tabse{0.83} & 51.39 \\
+\rowcolor{egbg} IQL + EG & \textbf{63.52}\tabse{0.04} & \textbf{67.24}\tabse{0.01} & 54.62\tabse{0.53} & \textbf{57.58}\tabse{0.05} & 51.19\tabse{1.06} & \textbf{49.60}\tabse{2.39} & \textbf{57.29} \\
+\midrule
+\rowcolor{ourbg} BC + MORSE & [X] & [X] & [X] & [X] & [X] & [X] & [X] \\
+\rowcolor{ourbg} TD3+BC + MORSE & [X] & [X] & [X] & [X] & [X] & [X] & [X] \\
+\rowcolor{ourbg} IQL + MORSE & [X] & [X] & [X] & [X] & \textbf{58.1} & [X] & [X] \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table}[t]
+\centering
+\footnotesize
+\caption{Return of every robot on 70\% Suboptimal Forward with IQL. EG is the final evaluation of our run of EG
+(seed 0); MORSE is the evaluation reported in Table~\ref{tab:main}.}
+\label{tab:robots}
+\begin{tabular}{l>{\columncolor{egbg}}c>{\columncolor{ourbg}}c}
+\toprule
+Robot & IQL + EG & IQL + MORSE \\
+\midrule
+\multicolumn{3}{l}{\textit{Quadrupeds}} \\
+A1 & 53.2 & 14.3 \\
+Go1 & 52.8 & 52.9 \\
+Go2 & 52.4 & 52.1 \\
+ANYmal B & 48.2 & 48.0 \\
+ANYmal C & 43.6 & 43.5 \\
+Barkour v0 & 45.5 & 46.9 \\
+Barkour vB & 55.0 & 55.2 \\
+Badger & 52.7 & 52.8 \\
+Bittle & 45.2 & 46.2 \\
+\multicolumn{3}{l}{\textit{Bipeds}} \\
+H1 & 54.2 & 54.3 \\
+G1 & 76.9 & 78.8 \\
+Talos & 110.8 & 110.5 \\
+OP3 & 101.5 & 102.2 \\
+NAO & 1.4 & 90.9 \\
+Cassie & 1.7 & 80.1 \\
+\multicolumn{3}{l}{\textit{Hexapod}} \\
+Hexapod & 0.0 & 0.0 \\
+\midrule
+Mean & 49.7 & 58.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:main} compares the mean return over the 16 robots. On 70\% Suboptimal Forward, where the conflicts
+between robots are strongest~\citep{abe2026crossembodimentoffline}, MORSE raises the return of IQL to 58.1, against 51.2
+for EG. [X: remaining datasets and base learners.] Table~\ref{tab:robots} shows the return of every robot on this
+dataset. MORSE learns the bipeds NAO and Cassie, on which EG obtains almost no return, and matches EG on the other robots
+except A1. Neither method learns the hexapod.
+
+\subsection{Analysis of Joint Interactions}
+\label{sec:analysis}
+
+Joint-level routing changes how the updates of different joints interact. Since a joint updates only the shared
+expert and the experts it selects, the interaction between two joints $u$ and $v$ in Eq.~\eqref{eq:conflict},
+restricted to the experts of a layer, is a sum over the experts they both use:
+\begin{equation}
+\bigl\langle g_u,g_v\bigr\rangle=\sum_{e\in\mathcal{S}_u\cap\mathcal{S}_v}G^e(u)\,G^e(v)\,
+\bigl\langle g^e_u,g^e_v\bigr\rangle,
+\label{eq:localized}
+\end{equation}
+where $\mathcal{S}_u$ is the set of experts used by joint $u$, including the shared expert, $G^e(u)$ its routing
+weight, and $g^e_u$ the gradient of its loss with respect to expert $e$ at unit weight. Joints that select different
+experts therefore interact only through the shared expert, whereas a shared network, the case $K=1$, couples every
+pair of joints through all of its parameters. [X: measured
+conflicts between robots on the shared core and decoder of URMA and on the experts of MORSE, and the experts that
+joints share across robots.]

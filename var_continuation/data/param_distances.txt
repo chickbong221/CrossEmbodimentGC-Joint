@@ -1,0 +1,10 @@
+L2 distance of the policy parameters per group, final +20k checkpoints (source = V7-CH-s0 at_75000)
+pair                               all      desc_embedding            std_head     decoder_experts        core_experts joint_state_encoder             routers
+S0 - source                    12.9920              0.3754              0.0191              2.5870             12.6666              0.0144              1.2186
+S1 - S0                         0.5823              0.3608              0.0234              0.2918              0.3481              0.0003              0.0454
+S2 - S0                         0.6230              0.3607              0.0191              0.2949              0.4102              0.0003              0.0499
+S3 - S0                         3.1222              0.3783              0.0239              0.9036              2.9138              0.0038              0.5445
+S1 - source                    12.9854              0.2961              0.0285              2.5722             12.6647              0.0143              1.2205
+S2 - source                    12.9842              0.2959              0.0000              2.5718             12.6637              0.0143              1.2197
+S3 - source                    12.7731              0.3212              0.0294              2.6771             12.4065              0.0141              1.3888
+S2 private offsets: max |offset| 0.0389, mean nonzero |offset| 0.0065

@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import multiprocessing.connection
 from copy import deepcopy
 import numpy as np
 import gymnasium as gym
@@ -107,6 +108,8 @@ class AsyncVectorEnvWithSkipping(gym.vector.AsyncVectorEnv):
 
             if sum(self.skipped_envs) <= self.skip_threshold:
                 break
+            # Sleep until another worker replies instead of spinning on poll() (frees a core and the GIL).
+            mp.connection.wait([pipe for pipe, skipped in zip(self.parent_pipes, self.skipped_envs) if skipped])
 
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT

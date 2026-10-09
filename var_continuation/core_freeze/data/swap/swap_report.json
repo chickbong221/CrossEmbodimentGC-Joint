@@ -1,0 +1,55 @@
+{
+ "early": "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/letuan_r2dreamergraph_2/morse/repo/experiments/runs/morse/V7-CH/V7-CH-s0/models/at_75000",
+ "late": "/pfss/mlde/workspaces/mlde_wsp_IAS_SAMMerge/letuan_r2dreamergraph_2/morse/ckpt/VARb/VARb-S0/models/at_95000",
+ "steps": {
+  "early": 300000,
+  "late": 380000
+ },
+ "configs": {
+  "ref75": {
+   "policy_sha1": "89cf087766e0c518f4ff99e368881ce06cfbd83d",
+   "core_sha1": "d14c95f85844f5193d491e9c1e800bc4b8f2ac53",
+   "rest_sha1": "60896ad52894bf913f96bb4a4cba35e1c932f843",
+   "reproduces_saved_policy": true
+  },
+  "ref95": {
+   "policy_sha1": "86ca585aefec855e465832d3dcd16f60049d9d68",
+   "core_sha1": "8c65381fcc18180eccc04a8839dcc8d6dc48d136",
+   "rest_sha1": "30a8a8008fefdf5a1ca2c6ca3eef11b71ff985d2",
+   "reproduces_saved_policy": true
+  },
+  "core75_rest95": {
+   "policy_sha1": "d122c762b90eae513f7431825032a7fa70fd1848",
+   "core_sha1": "d14c95f85844f5193d491e9c1e800bc4b8f2ac53",
+   "rest_sha1": "30a8a8008fefdf5a1ca2c6ca3eef11b71ff985d2",
+   "core_is_early": true,
+   "rest_is_late": true
+  },
+  "core95_rest75": {
+   "policy_sha1": "28a78fd467a9d2187ca48215bb3a6dd4964d83f9",
+   "core_sha1": "8c65381fcc18180eccc04a8839dcc8d6dc48d136",
+   "rest_sha1": "60896ad52894bf913f96bb4a4cba35e1c932f843",
+   "core_is_late": true,
+   "rest_is_early": true
+  }
+ },
+ "core_sha1": {
+  "early": "d14c95f85844f5193d491e9c1e800bc4b8f2ac53",
+  "late": "8c65381fcc18180eccc04a8839dcc8d6dc48d136"
+ },
+ "rest_sha1": {
+  "early": "60896ad52894bf913f96bb4a4cba35e1c932f843",
+  "late": "30a8a8008fefdf5a1ca2c6ca3eef11b71ff985d2"
+ },
+ "core_keys": [
+  "dense_0",
+  "dense_1",
+  "dense_2",
+  "ln_0",
+  "router",
+  "router_noise"
+ ],
+ "core_leaves": 24,
+ "core_params": 4112812,
+ "core_differs": true
+}

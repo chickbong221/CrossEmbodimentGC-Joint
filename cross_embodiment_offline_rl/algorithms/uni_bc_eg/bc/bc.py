@@ -15,7 +15,7 @@ import wandb
 
 from cross_embodiment_offline_rl.algorithms.uni_bc_eg.bc.general_properties import GeneralProperties
 from cross_embodiment_offline_rl.algorithms.uni_bc_eg.bc.policy import get_policy
-from cross_embodiment_offline_rl.algorithms.utils import Dataset, create_robot_groups
+from cross_embodiment_offline_rl.algorithms.utils import Dataset, BatchPrefetcher, create_robot_groups, robot_batch_sizes
 
 rlx_logger = logging.getLogger("rl_x")
 
@@ -50,7 +50,8 @@ class BC:
         self.nr_env_types = len(config.environment.train_robot_types)
         self.nr_eval_env_types = len(config.environment.eval_robot_types)
         self.robot_loss_weights = jnp.array([config.algorithm.robot_weights[robot_type] for robot_type in config.environment.train_robot_types])
-        
+        self.env_batch_sizes = robot_batch_sizes([config.algorithm.robot_weights[robot_type] for robot_type in config.environment.train_robot_types],
+                                                 config.algorithm.batch_size, self.nr_env_types)
 
         self.robot_groups = create_robot_groups(config.algorithm.embodiment_distance_path, config.environment.train_robot_types, config.algorithm.M)
         self.robot_groups = {
@@ -238,6 +239,23 @@ class BC:
             make_value_and_grad_fn(env_id)
             for env_id in range(self.nr_env_types)
         ]
+
+        # 3. One compiled policy update per robot group: the group's gradients (same key sequence as
+        #    calling the per-robot functions one by one), their mean, and the optimizer step.
+        def make_group_update_fn(env_ids):
+            def group_update(policy_state, batches, key):
+                losses, grads_list = [], []
+                for env_id, batch in zip(env_ids, batches):
+                    key, subk = jax.random.split(key)
+                    loss, grads = self._policy_value_and_grad_fns[env_id](
+                        policy_state.params, batch.observations, batch.actions, subk)
+                    grads_list.append(grads)
+                    losses.append(loss)
+                grads = jax.tree_util.tree_map(lambda *gs: sum(gs) / len(gs), *grads_list)
+                return policy_state.apply_gradients(grads=grads), jnp.array(losses).mean(), key
+            return jax.jit(group_update)
+
+        self._group_update_fns = {group: make_group_update_fn(tuple(env_ids)) for group, env_ids in self.robot_groups.items()}
     
     def train(self):
         def train_loop():
@@ -350,6 +368,8 @@ class BC:
                 time_metrics = {
                     "time/sps": sps
                 }
+                if prefetcher is not None:
+                    time_metrics["time/data_wait_s"] = prefetcher.wait_s
                 if not first_eval:
                     self.global_step += int(self.batch_size)
                     self.current_nr_updates += 1
@@ -365,11 +385,21 @@ class BC:
 
                 additional_metrics = {**rollout_info_metrics, **self.evaluation_metrics, **env_info_metrics, **steps_metrics, **time_metrics}
 
-                self.start_logging(self.global_step)
+                # Written one update later, after the next update has been dispatched, with a single
+                # device-to-host copy: the device never waits for the host's logging.
+                flush_log()
+                self.pending_log = (self.global_step, additional_metrics, optimization_metrics)
+
+            def flush_log():
+                if self.pending_log is None:
+                    return
+                step, additional_metrics, optimization_metrics = self.pending_log
+                self.pending_log = None
+                self.start_logging(step)
                 for key, value in additional_metrics.items():
-                    self.log(key, value, self.global_step)
-                for key, value in optimization_metrics.items():
-                    self.log(key, value, self.global_step)
+                    self.log(key, value, step)
+                for key, value in jax.device_get(optimization_metrics).items():
+                    self.log(key, value, step)
                 self.end_logging()
 
             
@@ -388,73 +418,52 @@ class BC:
 
                 
                 for group in group_keys_perm:
-                    losses = []
-                    grads_list = []
-                    for env_id in self.robot_groups[group]:
-                        batch = env_batches[env_id]
-                        key, subk = jax.random.split(key)
-                        obs_b, act_b = batch.observations, batch.actions
-
-                        # Call the precompiled loss+grad function here
-                        loss, grads = self._policy_value_and_grad_fns[env_id](
-                            policy_state.params,
-                            obs_b,
-                            act_b,
-                            subk
-                        )
-                        # Apply gradients to update the policy
-                        grads_list.append(grads)
-                        losses.append(loss)
-                     
-                    grads = jax.tree_util.tree_map(
-                        lambda *gs: sum(gs) / len(gs),
-                        *grads_list
-                    )
-
-                    policy_state = policy_state.apply_gradients(
-                        grads   = grads
+                    # Gradients of the group's robots, their mean, and one optimizer step (compiled)
+                    policy_state, losses, key = self._group_update_fns[group](
+                        policy_state,
+                        tuple(env_batches[env_id] for env_id in self.robot_groups[group]),
+                        key
                     )
                 carry = (policy_state, key)
-                losses = jnp.array(losses).mean()
-                return carry, losses
-            
-            def update_with_variable_batch_sizes(policy_state, env_batches, key):            
+                return carry, losses   # mean loss of the last group, as before
+
+            @jax.jit
+            def softmax_temperatures(policy_params):
+                return {f"policy/{part}_softmax_temp": jnp.exp(policy_params["params"][f"{part}_log_softmax_temperature"])[0] + self.softmax_temperature_min
+                        for part in ("joint", "foot")}
+
+            def update_with_variable_batch_sizes(policy_state, env_batches, key):
                 # Execute the update process
                 key, subkey = jax.random.split(key)
                 carry = policy_state, key
-                
+
                 # Update policy
                 carry, policy_loss = update_policy_sequentially(carry, env_batches)
-                
+
                 # Get final states
                 policy_state, key = carry
-                
+
                 # Compute metrics
                 mean_metrics = {
                     'policy_loss': policy_loss,
                 }
-   
+
                 # Add softmax temperature metrics
-                mean_metrics["policy/joint_softmax_temp"] = jnp.exp(policy_state.params["params"]["joint_log_softmax_temperature"])[0] + self.softmax_temperature_min
-                mean_metrics["policy/foot_softmax_temp"] = jnp.exp(policy_state.params["params"]["foot_log_softmax_temperature"])[0] + self.softmax_temperature_min
-          
+                mean_metrics.update(softmax_temperatures(policy_state.params))
+
                 return policy_state, mean_metrics, key
 
             def train_offline(carry, _):
                 policy_state, dataset, state, key = carry
                 key, subkey = jax.random.split(key)
 
-                env_batch_sizes = []
-                total_weight = sum(self.robot_loss_weights)
-                for env_type_id in range(self.nr_env_types):
-                    # Adjust batch size based on environment importance
-                    weight_ratio = self.robot_loss_weights[env_type_id] / total_weight
-                    env_batch_sizes.append(int(self.config.algorithm.batch_size * self.nr_env_types * weight_ratio))
-                
-                # Sample per environment type
-                env_batches, key = dataset.sample(subkey, env_batch_sizes)
-                env_batches = [numpy_to_jax(batch) for batch in env_batches]
-                
+                # Sample per environment type (batch sizes proportional to the robot loss weights, self.env_batch_sizes)
+                if prefetcher is not None:
+                    env_batches = prefetcher.next()
+                else:
+                    env_batches, key = dataset.sample(subkey, self.env_batch_sizes)
+                    env_batches = [numpy_to_jax(batch) for batch in env_batches]
+
                 # Update model
                 env_batches = tuple(env_batches)
                 policy_state, mean_metrics, key = update_with_variable_batch_sizes(
@@ -477,8 +486,9 @@ class BC:
             state = jax.pure_callback(env_reset_callback, state_shape)
 
             rlx_logger.info(f"start loading dataset")
-            dataset = Dataset(self.config.algorithm.dataset_path, self.config.algorithm.normalize_state)
+            dataset = Dataset(self.config.algorithm.dataset_path, self.config.algorithm.normalize_state, mmap=self.config.algorithm.dataset_mmap)
             rlx_logger.info(f"finish loading dataset")
+            prefetcher = BatchPrefetcher(dataset, self.env_batch_sizes, self.seed) if self.config.algorithm.data_prefetch else None
             carry = (self.policy_state, dataset, state, self.key)
 
             reset_step_info_collection_callback()
@@ -487,12 +497,16 @@ class BC:
 
             for _ in range(int(self.nr_offline_updates)):
                 carry, _ = train_offline(carry, None)
+            flush_log()
+            if prefetcher is not None:
+                prefetcher.close()
             ( self.policy_state, _, _, _ ) = carry
 
         state, _ = self.env.reset()
         self.np_state_shape = state.shape
         self.saving_return_buffer = deque(maxlen=100 * self.nr_envs)
         self.evaluation_metrics = {}
+        self.pending_log = None
         self.last_time = time.time()
         self.global_step = 0
         self.current_nr_updates = 0

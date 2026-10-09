@@ -25,6 +25,9 @@ def get_config(algorithm_name):
     config.save_latest_frequency = 1000
     config.determine_fastest_cpu_for_gpu = False
     config.dataset_path='data/offline_data/all_robots_expert_forward_1m'
+    config.dataset_mmap = False    # memory-map the dataset files instead of loading them into RAM
+    config.data_prefetch = True    # sample minibatches in background threads (NumPy generator seeded with
+                                   # environment.seed); False: the original in-loop sampler on the training key
     # IQL SPECIFIC
     config.normalize_state = False
     config.expectile = 0.7 
