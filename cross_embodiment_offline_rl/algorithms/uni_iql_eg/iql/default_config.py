@@ -60,6 +60,7 @@ def get_config(algorithm_name):
     }
 
     config.M = 4
+    config.joint_encoder_hidden = 0   # > 0: EG variant with one hidden layer of this width in the policy's joint-state encoder (0: original)
     config.embodiment_distance_path = "data/meta/embodiment_distance.npy"
      
     return config

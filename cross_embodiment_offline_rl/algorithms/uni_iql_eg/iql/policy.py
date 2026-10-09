@@ -22,7 +22,8 @@ def get_policy(config, env):
                 config.algorithm.softmax_temperature, config.algorithm.softmax_temperature_min,
                 config.algorithm.stability_epsilon,
                 config.algorithm.policy_mean_abs_clip,
-                config.algorithm.policy_std_min_clip, config.algorithm.policy_std_max_clip
+                config.algorithm.policy_std_min_clip, config.algorithm.policy_std_max_clip,
+                int(getattr(config.algorithm, "joint_encoder_hidden", 0))
             ), 
             get_processed_action_function()
         )
@@ -36,6 +37,7 @@ class Policy(nn.Module):
     policy_mean_abs_clip: float
     policy_std_min_clip: float
     policy_std_max_clip: float
+    joint_encoder_hidden: int = 0   # > 0: one hidden layer (LayerNorm, ELU) of this width in the joint-state encoder (3 -> H -> 4)
 
     @nn.compact
     def __call__(self, dynamic_joint_description, dynamic_joint_state, dynamic_foot_description, dynamic_foot_state, general_state):
@@ -45,7 +47,10 @@ class Policy(nn.Module):
         dynamic_joint_state_mask = nn.elu(dynamic_joint_state_mask)
         dynamic_joint_state_mask = nn.Dense(64)(dynamic_joint_state_mask)
         dynamic_joint_state_mask = jnp.clip(nn.tanh(dynamic_joint_state_mask), -1.0 + self.stability_epsilon, 1.0 - self.stability_epsilon)
-        latent_dynamic_joint_state = nn.Dense(4)(dynamic_joint_state)
+        joint_encoder_input = dynamic_joint_state
+        if self.joint_encoder_hidden > 0:
+            joint_encoder_input = nn.elu(nn.LayerNorm()(nn.Dense(self.joint_encoder_hidden)(joint_encoder_input)))
+        latent_dynamic_joint_state = nn.Dense(4)(joint_encoder_input)
         latent_dynamic_joint_state = nn.elu(latent_dynamic_joint_state)
         joint_e_x = jnp.exp(dynamic_joint_state_mask / (jnp.exp(joint_log_softmax_temperature) + self.softmax_temperature_min))
         dynamic_joint_state_mask = joint_e_x / (joint_e_x.sum(axis=-1, keepdims=True) + self.stability_epsilon)
