@@ -13,3 +13,4 @@ experiments/stdout*
 # large analysis dumps and scratch
 experiments/analysis/results/**/*.npz
 tmp/
+MORSE_HANDOFF.md
