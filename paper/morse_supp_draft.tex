@@ -1,0 +1,180 @@
+% MORSE supplementary material draft (2026-10-13). Material moved out of the main Method and Empirical Study.
+% Uses the same preamble and notation as morse_cvpr_revised.tex.
+
+\section{Router Details}
+\label{supp:router}
+
+Both branches of the router in Eq.~\eqref{eq:router} are two-layer perceptrons; the state branch applies
+$\operatorname{symlog}(v)=\operatorname{sign}(v)\log(1+|v|)$ to its input. Their output layers start from small random
+weights (standard deviation $0.01$), so that different units begin with different expert sets.
+
+\paragraph{Weights without renormalization.}
+TopK keeps the $k$ largest routing probabilities and does not renormalize them. While the router is uncertain, the
+selected experts therefore receive small weights and the shared expert dominates; a routed expert gains weight only
+as the router becomes confident, so that specialization departs gradually from the shared computation.
+
+\paragraph{Learned routing noise.}
+During training, a second router with the same inputs predicts a scale
+$\sigma_b(t)=\operatorname{softplus}(\cdot)+0.01$, and $\sigma_b(t)\,\epsilon$ with $\epsilon\sim\mathcal{N}(0,I)$ is
+added to $h_b(t)$ before the selection, which lets every unit explore other experts. The routing objective uses the
+same perturbed probabilities with the noise held fixed. At inference, the noise is removed.
+
+\section{Joint Groups}
+\label{supp:groups}
+
+The descriptor of every joint provides nine joint-local features (Table~\ref{tab:features}): the absolute rotation axis in the torso frame (3),
+the number of direct child joints, the absolute nominal position, the torque and velocity limits, the width of the
+range, and the absolute center of the range. The two limits and the width of the range enter on a logarithmic scale.
+The absolute values make the features identical for the left and right counterparts of a joint. The position of the
+joint in the torso frame, the robot-wide gains, the mass, and the dimensions of the robot are excluded. Damping,
+armature, stiffness, and friction loss are excluded as well: the data are collected with these drawn per episode from
+a range shared by all joints of a robot, so they describe the robot rather than the joint. The features are
+standardized over all joints of all robots, and $k$-means with $k=8$ (best of 50 $k$-means++ initializations) is run
+once before training. The normalized mutual information between the groups and robot identity is 0.40, so the groups
+are far from a partition by robot. Table~\ref{tab:groups} lists the eight groups.
+
+\begin{table}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+\caption{Criteria used to group the joints: nine joint-local features of the joint descriptor. Absolute values make
+the left and right counterparts of a joint identical. All features are standardized over the joints of all robots
+before $k$-means.}
+\label{tab:features}
+\begin{tabular}{p{2.0cm} p{4.2cm} l}
+\toprule
+Feature (dim.) & What it describes & Encoding \\
+\midrule
+\raggedright Rotation axis (3) & \raggedright Direction about which the joint turns, in the torso frame; it separates
+roll ($x$), pitch ($y$), and yaw ($z$) joints & absolute \\
+\raggedright Child joints (1) & \raggedright Number of joints that directly follow along the limb, \eg, one for a
+thigh and none for a knee & count \\
+\raggedright Nominal position (1) & \raggedright Angle of the joint in the default standing pose, \ie, how bent it is
+at rest & absolute, rad \\
+\raggedright Torque limit (1) & \raggedright Largest torque the motor of the joint can exert, \ie, its strength & log,
+Nm \\
+\raggedright Velocity limit (1) & \raggedright Fastest the joint can turn & log, rad/s \\
+\raggedright Range width (1) & \raggedright Span of angles between the two limits of the joint & log, rad \\
+\raggedright Range center (1) & \raggedright Middle of the range, relative to the zero angle of the joint & absolute,
+rad \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Group g is index g-1 in cross_embodiment_offline_rl/algorithms/morse/v8_joint_groups_rev_k8.json.
+\begin{table*}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\caption{The eight joint groups. Counterparts of a joint (left and right, front and hind) are listed once. Torque and
+velocity limits are medians over the joints of a group, with the range of the torque limit in parentheses.}
+\label{tab:groups}
+\begin{tabular}{cccl p{3.3cm} p{6.5cm}}
+\toprule
+Group & Joints & Robots & Type & Characteristics & Members \\
+\midrule
+1 & 52 & 13 & Roll & \raggedright roll axis; 29\,Nm (1.8--201), 20\,rad/s &
+Hip abduction of A1, Go1, Go2, ANYmal~B, ANYmal~C, Barkour~v0, Barkour~vB, and Badger; hip roll of H1, G1, Talos,
+NAO, and Cassie; shoulder roll of H1, G1, Talos, and NAO; ankle roll of G1 \\
+2 & 20 & 6 & Thigh & \raggedright pitch axis; one child joint; nominal 0.9\,rad; range 5.1\,rad &
+Thigh of A1, Go1, Go2, and Barkour~vB, and of the front legs of Barkour~v0; elbow pitch of G1 \\
+3 & 26 & 7 & Knee & \raggedright pitch axis; no child joint; nominal 1.5\,rad; range 1.9\,rad &
+Calf of A1, Go1, Go2, Barkour~v0, Barkour~vB, and Badger; foot of Cassie \\
+4 & 54 & 8 & Pitch, larger motors & \raggedright pitch axis; 75\,Nm (12--403) &
+Hip and knee flexion of ANYmal~B and ANYmal~C; thigh of Badger and of the hind legs of Barkour~v0; spine of Badger;
+hip, knee, and ankle pitch of H1, G1, and Talos; hip pitch and knee of Cassie; shoulder pitch of H1 and G1; elbow of
+H1 and Talos; back pitch of Talos \\
+5 & 28 & 3 & Pitch, small servos & \raggedright pitch axis; 3.0\,Nm (0.3--4.1) &
+All joints of Bittle; head, shoulder, hip, knee, and ankle pitch of OP3 and NAO; elbow roll of NAO \\
+6 & 15 & 4 & Yaw, fast and strong & \raggedright yaw axis; 88\,Nm (18--201), 23\,rad/s &
+Hip yaw of H1, G1, and Cassie; torso yaw of H1, G1, and Talos; shoulder yaw of H1 and G1; elbow roll of G1 \\
+7 & 22 & 4 & Yaw, slow & \raggedright yaw axis; 3.7\,Nm (1.5--100), 3.9\,rad/s &
+Hip yaw of Talos and OP3; shoulder, elbow, and wrist yaw of Talos; head yaw of OP3 and NAO; hip yaw-pitch and elbow
+yaw of NAO; coxa of Hexapod \\
+8 & 24 & 4 & Roll, slow servos & \raggedright roll axis; 2.7\,Nm (2.0--8.0), 1.8\,rad/s &
+Shoulder, hip, and ankle roll and elbow of OP3; ankle roll of NAO; wrist roll of Talos; femur and tibia of Hexapod \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Reading the table.}
+Every joint of the 16 robots is revolute: it rotates about a single axis. We express this axis in the frame of the
+torso, in which $x$ points forward, $y$ sideways, and $z$ up. A \emph{roll} joint rotates about the forward axis $x$
+and tilts a limb sideways, as hip abduction does when it spreads a leg away from the body. A \emph{pitch} joint
+rotates about the sideways axis $y$ and swings a limb forward and backward, as the hip, knee, and ankle do in walking.
+A \emph{yaw} joint rotates about the vertical axis $z$ and turns a limb, the torso, or the head to the left or right.
+The axis separates the joints most clearly: Groups~1 and~8 hold roll joints, Groups~2--5 pitch joints, and Groups~6
+and~7 yaw joints. Joints that perform the same motion therefore meet in one group regardless of the robot; Group~1,
+for example, joins the hip abduction of all eight quadrupeds with the hip and shoulder roll of the humanoids.
+
+Within one axis, the remaining features divide the joints further. The number of child joints counts the joints that
+directly follow along the limb: the thigh joint of a quadruped is followed by the knee, whereas the knee ends the
+leg. The nominal position is the angle of the joint in the default standing pose, and the range is the span of
+angles between its two limits (1\,rad $\approx 57^\circ$). These features separate the thighs (Group~2: one child
+joint, nominal 0.9\,rad, range 5.1\,rad) from the knees (Group~3: no child joint, a strongly bent nominal pose of
+1.5\,rad, range 1.9\,rad). The grouping follows the mechanics of a joint rather than its name: the elbow of G1 joins
+the thighs because, like a thigh, it is a bent pitch joint followed by one more joint. The torque limit is the
+largest torque the motor of a joint can exert and measures its strength; the velocity limit is the fastest the joint
+can turn. These limits set the small robots apart, whose joints are driven by servos, compact motors with an
+integrated gearbox and controller that exert at most a few newton-metres. Among the remaining pitch joints, Group~4
+holds those driven by larger motors (median 75\,Nm, at least 12\,Nm) and Group~5 those of Bittle, OP3, and NAO
+(median 3\,Nm, at most 4.1\,Nm). The yaw joints divide likewise into Group~6, with strong and mostly fast motors
+(median 88\,Nm and 23\,rad/s), and Group~7, with slow ones (median 3.9\,rad/s), and the roll joints into Group~1 and
+Group~8, whose joints are both weak and slow (median 2.7\,Nm and 1.8\,rad/s).
+
+Three assignments deserve a closer look. First, the left and right counterparts of a joint have the same features,
+because the features use absolute values, and they always share a group; front and hind legs share a group unless
+their joints differ, as for the thighs of Barkour~v0, whose ranges are centered 0.8\,rad apart (Groups~2 and~4).
+Second, the legs of the hexapod point sideways from the torso, so its femur and tibia joints, which move the leg up
+and down as the pitch joints of a quadruped do, rotate mainly about the forward axis and join the roll joints in
+Group~8. Third, small motors alone do not place a joint in Group~8: the hip and shoulder roll of NAO, which are
+followed by further joints and have a narrow range like the hip abduction of the quadrupeds, stay in Group~1, whereas
+its ankle roll, which ends the leg, falls into Group~8. Overall, most groups span several robots, and the joints of
+one robot spread over several groups; G1, for instance, has joints in Groups~1, 2, 4, and~6. Experts aligned with
+these groups can thus be shared by similar joints of different robots and differ between dissimilar joints of the
+same robot.
+
+\section{MORSE on the URMA Architecture}
+\label{supp:urma}
+
+MORSE applies to any policy of the form of Eq.~\eqref{eq:policy}. To compare directly with the results reported on
+the benchmark, we instantiate it on URMA~\citep{bohlinger2024onepolicy}, the architecture adopted
+by~\citet{abe2026crossembodimentoffline}, and keep every URMA component that does not carry an expert layer. URMA
+consists of three stages: (1) a joint encoder and a foot encoder, whose outputs are aggregated with the general
+observation by attention over the descriptors; (2) a core that maps the aggregate to the body representation $z$; and
+(3) a decoder that predicts the action mean of every joint from $z$, the joint encoding, and an embedding of the joint
+descriptor, next to a separate branch for the standard deviation. In Stage (1), we turn the second layer of the joint
+encoder into a joint-level expert layer; in Stage (2), every second layer of the core into an embodiment-level expert
+layer; and in Stage (3), the decoder into a bank of decoder experts. The aggregation, the foot encoder, the
+standard-deviation branch, and the critics remain unchanged (Fig.~\ref{fig:urma}). The main text describes the
+policy with joints only for brevity: in URMA, the feet are encoded and aggregated like the joints, and the robot
+descriptor $\bar d_r$ also includes the mean foot descriptor and the number of feet.
+% [X] Add the layer widths, the expert hidden widths, the router sizes, and the parameter counts here.
+
+\begin{figure}[t]
+\centering
+\fbox{\rule{0pt}{1.3in}\rule{0.95\linewidth}{0pt}}
+\caption{MORSE instantiated on URMA. URMA modules are shown in gray and the expert layers of MORSE in orange. The
+aggregation, the foot encoder, the standard-deviation branch, and the critics are unchanged.}
+\label{fig:urma}
+\end{figure}
+
+\section{Interaction between Joint Updates}
+\label{supp:interaction}
+
+Sparse routing changes which updates meet in the same parameters. For a joint-level layer $b$, let $g_u$ be the
+gradient that joint $u$ of one transition contributes to the parameters of the layer. In a dense layer, $g_u$ spans
+all parameters, so every pair of joints, within and across robots, interacts through all of them. In an expert layer,
+$g_u$ is nonzero only on the shared expert and the experts selected by $u$, and the interaction of two joints reduces
+to the experts they both use,
+\begin{equation}
+\bigl\langle g_u,g_v\bigr\rangle=\sum_{e\in\mathcal{S}_u\cap\mathcal{S}_v}G^e_b(u)\,G^e_b(v)\,
+\bigl\langle g^e_u,g^e_v\bigr\rangle,
+\label{eq:localized}
+\end{equation}
+where $\mathcal{S}_u$ contains the shared expert and the experts selected by $u$, and $g^e_u$ is the gradient of the
+loss of $u$ with respect to expert $e$ at unit weight. Following the measurement
+of~\citet{abe2026crossembodimentoffline}, we compare the agreement between the gradients of different robots on the
+dense core and decoder of URMA and on the experts of MORSE [X].

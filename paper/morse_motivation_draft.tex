@@ -1,0 +1,139 @@
+% MORSE motivation draft (2026-10-15). Drop-in text for morse_cvpr_revised.tex, written in the strong version:
+% every [X] is filled from the analyses listed at the end of this file (run them with the revised joint groups,
+% v8_joint_groups_rev_k8.json). Notation and labels follow the draft; no new bib entries are needed.
+%
+% Part A replaces Introduction paragraphs 2-4 and the contribution list (paragraph 1 and the teaser figure stay).
+% Part B is a new section between Problem Formulation (Sec. 3) and Method (Sec. 4).
+
+% =====================================================================================================================
+% PART A: INTRODUCTION (after the unchanged first paragraph)
+% =====================================================================================================================
+
+A widely used design for such policies handles robots with different numbers of joints by processing every joint
+with shared modules and predicting the action of every joint with a shared decoder, conditioned on a description of
+the joint and the body~\citep{huang2020smp,gupta2022metamorph,bohlinger2024onepolicy}. This design lets one network
+control any body, but it also fixes how the robots share it: every joint of every robot updates the same parameters.
+The hip-abduction joint of a quadruped, the knee of a humanoid, and the coxa of a hexapod rotate about different axes,
+carry different loads, and play different roles in the gait, and yet their updates accumulate on the same weights;
+conditioning on the descriptor changes the input of the shared modules, not the parameters they update. We find that
+this sharing makes the updates of dissimilar joints interfere: in a trained policy, the gradients of joints of
+different types conflict in [X]\% of pairs, even within one robot, whereas joints of the same type agree across
+robots (Sec.~\ref{sec:where}).
+
+Existing remedies change how the robots update this shared network rather than what they share. Gradient surgery
+projects conflicting gradients onto each other~\citep{yu2020pcgrad}, and task grouping updates groups of tasks in
+turn~\citep{jeong2025sel}. Embodiment Grouping (EG) brings the latter to robots: it clusters them by whole-body
+morphology and updates the policy one group at a time, motivated by the conflicts between the gradients of different
+robots~\citep{abe2026crossembodimentoffline}. A grouped update, however, changes when a robot updates the parameters,
+not which parameters it updates. Every group still writes to every weight of the policy, and the optimizer state that
+the groups share carries the step of one group into the next. Sequential group updates have been shown to help by
+improving the learning of task-specific parameters~\citep{jeong2025sel}, which a fully shared policy does not have,
+and indeed, conflicting gradients are as frequent within an EG group as between groups [X] (Sec.~\ref{sec:where}).
+Moreover, the unit of all these methods is the whole robot, whereas robots are alike in some joints and different in
+others: a decision made per robot can neither separate the dissimilar joints of similar robots nor join the similar
+joints of dissimilar ones.
+
+These observations point to two requirements for sharing in a cross-embodiment policy. First, interfering updates
+should be assigned to different parameters, rather than to the same parameters at different times. Second, the unit
+that decides the sharing should match the unit of the computation. The joint encoder and the decoder process one joint
+at a time, and their gradients agree between joints of the same type across robots; the core aggregates the whole
+body, and its gradients agree between robots with similar bodies [X] (Sec.~\ref{sec:where}). Sharing should
+therefore follow the joint in the joint-level maps and the embodiment in the embodiment-level map.
+
+Sparse mixtures of experts (MoE) meet the first requirement. A router sends each input to a few experts from a shared
+pool, so that two inputs update common parameters only through the experts they both
+select~\citep{shazeer2017outrageously,fedus2022switch}, and expert layers have been used to reduce the interference
+between tasks~\citep{chen2023modsquad,hendawy2024moore}. In these models, however, the routed unit is a token or a
+task. A cross-embodiment policy leaves the second requirement open: which unit to route at each stage of the policy,
+and which morphological relationships the routing should follow.
+
+To this end, we introduce Morphology-aware Routing of Shared Experts (MORSE), a framework that assigns the updates of
+dissimilar joints and embodiments to different parameters by routing every stage of the policy at the level of its
+computation. Each expert layer combines an always-active shared expert, which retains the computation common to all
+robots, with a pool of routed experts shared across robots. In the joint-level layers, which encode the observation
+and predict the action of each joint, a router conditioned on the properties and the state of the joint selects a few
+experts for every joint. In the embodiment-level layers, which process the aggregated body representation, a router
+conditioned on the embodiment and its state selects experts for the whole robot, and the result informs the action of
+every joint. A mutual-information objective aligned with these two levels encourages joints of the same type and
+robots of the same embodiment to rely on the same experts. Apart from this routing objective, MORSE leaves the offline
+RL algorithm unchanged, so it applies to standard offline RL algorithms and complements methods that change how the
+policy is updated. In summary, the main contributions of this paper are threefold:
+\begin{itemize}
+    \item We analyze where the updates of a cross-embodiment policy interfere, and show that the interference follows
+    the type of the joint in the joint-level maps and the embodiment in the core, and that grouping the update by robot
+    leaves it unchanged, since all groups update the same parameters.
+    \item We propose MORSE, which assigns interfering updates to different experts and routes every stage of the policy
+    at the level of its computation, every joint in the joint encoder and decoder and every embodiment in the core,
+    with a routing objective that aligns the experts with groups of similar joints and with embodiments.
+    \item We provide a thorough empirical study on 16 legged robots, six datasets, and three offline RL algorithms,
+    showing that MORSE reduces the interference [X] and outperforms robot-level grouping and conflict-resolution
+    methods, together with controlled comparisons of routing granularity, grouping, capacity, and robot reweighting.
+\end{itemize}
+
+% =====================================================================================================================
+% PART B: NEW SECTION, inserted after Problem Formulation (Sec. 3) and before Method (Sec. 4)
+% =====================================================================================================================
+
+\section{Where Do the Updates Interfere?}
+\label{sec:where}
+
+Before presenting MORSE, we examine how joints and robots interact when they update the shared maps of
+Eq.~\eqref{eq:policy}. We train the morphology-agnostic policy of~\citet{bohlinger2024onepolicy} with IQL on the 70\%
+Suboptimal Forward dataset [X: setup] and, at checkpoints throughout training, compute the gradient of the actor loss
+of Eq.~\eqref{eq:actor_loss} for individual units. For the joint-level maps $F$ and $D$, a unit is a joint of a robot,
+and its gradient is the one that the map receives through the computation of that joint; for the embodiment-level map
+$C$, a unit is a robot. As in~\citep{yu2020pcgrad,abe2026crossembodimentoffline}, two units conflict when the cosine
+similarity of their gradients is negative. We compare joints by the joint groups of Sec.~\ref{sec:routing}, which
+cluster the joints of all robots by their kinematic and dynamic properties, and robots by the morphology groups of EG.
+Figure~\ref{fig:where} summarizes the results.
+
+\begin{figure*}[t]
+\centering
+\fbox{\rule{0pt}{1.5in}\rule{0.95\textwidth}{0pt}}
+\caption{Where the updates of a shared cross-embodiment policy interfere (IQL, 70\% Suboptimal Forward).
+(a) Joint encoder and decoder: gradient cosine between joints of the same and of different joint groups, across robots
+and within one robot. (b) Core: gradient cosine between robots, ordered by the groups of EG. (c) Fraction of
+conflicting pairs within and between EG groups, under the joint update and during training with EG. [X]}
+\label{fig:where}
+\end{figure*}
+
+\paragraph{Joint-level interference follows the type of the joint.}
+In the joint encoder and the decoder, joints of the same group agree across robots: their gradients have a mean
+cosine of [X], compared with [X] for joints of different groups, of which [X]\% conflict. The disagreement does not
+stop at the boundary of a robot. Within one robot, joints of different groups conflict in [X]\% of pairs, as often as
+joints of different robots [X]. A joint thus has more in common with the joints of the same type in other robots than
+with the other joints of its own body, a relationship that no decision made per robot can express.
+
+\paragraph{Embodiment-level interference follows the body.}
+The core processes the aggregated representation of the whole body, and here the structure is that of robots: robots
+with similar bodies have aligned gradients, with a mean cosine of [X] within EG groups compared with [X] between them.
+At this level, the embodiment is the natural unit of sharing.
+
+\paragraph{Grouping the update does not separate the updates.}
+EG updates its groups in turn, and yet conflicting pairs are as frequent within its groups as between them ([X]\% and
+[X]\%), and the fraction of conflicting pairs during training with EG stays close to that of the joint update ([X]\%
+and [X]\%). This is expected: a grouped update changes when a robot writes to the parameters, not which parameters it
+writes to. All groups update the same weights, and since they share the state of the optimizer, the step taken for one
+group is dominated by the momentum of the others; with the first-moment rate $\beta_1=0.9$ of Adam, the gradient of the
+current group enters the step with weight $1-\beta_1=0.1$.
+
+\paragraph{Implications.}
+Two requirements follow. Interfering updates must reach different parameters, which calls for parameters that are not
+shared by all units, and the unit that decides the sharing must match the computation: the joint in the joint-level
+maps and the embodiment in the core. MORSE meets both with sparse expert layers routed at the level of each map
+(Sec.~\ref{sec:method}).
+
+% =====================================================================================================================
+% ANALYSES THAT FILL THE [X] (not part of the paper)
+% =====================================================================================================================
+% A1  Joint level, same vs different group (revised k=8 table): mean cosine and % conflicting, cross-robot and
+%     within-robot pairs, per checkpoint, 2 seeds. Recomputable from the saved dense-URMA gradient files
+%     (experiments/analysis/results/conflict/data, 2k-100k, seeds 0/1) with conflict_grouping.py and the new table;
+%     the within-robot, different-group split needs a small addition to the script. No training needed.
+% A2  Core, within vs between EG groups: mean cosine. Same files, no training needed.
+% A3  Conflicting pairs during EG training: port the conflict hook (morse/conflict.py) to uni_iql_eg and run it on EG
+%     checkpoints (2k-50k, >=2 seeds); compare with the dense run at the same checkpoints.
+% A4  Contribution 3, "MORSE reduces the interference": the same measure on MORSE checkpoints, on the shared expert
+%     and on the routed experts (only pairs that select a common expert interact), against the dense policy and EG.
+%     Add a control with random routing of the same sparsity, so that the reduction is not attributed to sparsity
+%     alone, and relate the per-robot change in interference to the per-robot change in return.

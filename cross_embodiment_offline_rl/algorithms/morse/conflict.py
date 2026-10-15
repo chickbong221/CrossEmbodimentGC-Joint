@@ -39,15 +39,61 @@ from cross_embodiment_offline_rl.algorithms.morse.ckpt_analysis import load_chec
 from cross_embodiment_offline_rl.algorithms.morse.coordination import episode_table, load_end_flags, reference_mask
 
 HI = jax.lax.Precision.HIGHEST
+CHUNK = 128          # samples per Jacobian chunk of the per-unit gradients
 GROUPS = ("enc", "core", "dec", "std", "all")
 VARIANTS = ("iql", "bc")
 CLASSES = ("success", "fall", "low")
 ENCODER_ROLES = ("joint_state_encoder", "foot_state_encoder", "joint_attention", "foot_attention")
+# Parameter names of the expert policy (morse_arch=v8, morse/v8.py) and their group.
+V8_PREFIXES = (("enc_", "enc"), ("foot_", "enc"), ("joint_", "enc"), ("core_", "core"), ("dec_moe", "dec"), ("std_", "std"))
+
+
+def _whole(size):
+    return [(0, size)]
+
+
+def _enc_moe(keys, size):
+    """The joint-encoder layer that the expert policy turns into an expert layer: the hidden 256 -> 256 layer of the
+    dense joint-state encoder, or the experts of the expert policy's enc_moe (its router excluded)."""
+    hit = len(keys) > 1 and ((keys[0] == "joint_encoder" and keys[1] == "dense_1")
+                             or (keys[0] == "enc_moe" and keys[1] == "experts"))
+    return _whole(size) if hit else []
+
+
+def _dec_exp(keys, size):
+    """The decoder that the expert policy replaces by a bank of experts: the dense decoder and its description
+    embedding, or the experts of the expert policy's dec_moe (its router excluded)."""
+    if len(keys) > 1 and keys[0] == "dec_moe":
+        return _whole(size) if keys[1] == "experts" else []
+    return _whole(size) if param_group(keys) in ("decoder_experts", "desc_embedding") else []
+
+
+def _expert_part(layer, part):
+    """The shared expert (index 0) or the routed experts (1..K-1) of an expert layer of the expert policy: every expert
+    parameter is (K, ...), so each expert is a contiguous block of a leaf."""
+    def member(keys, size, shape0=None):
+        if len(keys) < 2 or keys[0] != layer or keys[1] != "experts" or not shape0:
+            return []
+        block = size // shape0
+        return [(0, block)] if part == "shared" else [(block, size)]
+    return member
+
+
+# Extra parameter groups, reported after GROUPS (they overlap them). Each maps (keys, size[, K]) to ranges of a leaf.
+SUBGROUPS = {"enc_moe": _enc_moe, "dec_exp": _dec_exp}
+EXPERT_PARTS = {f"{tag}_{part}": _expert_part(layer, part)
+                for tag, layer in (("enc", "enc_moe"), ("core1", "core_moe1"), ("core2", "core_moe2"), ("dec", "dec_moe"))
+                for part in ("shared", "routed")}
+SUBGROUPS.update(EXPERT_PARTS)
 
 
 def analysis_group(path):
     """Group of a policy parameter from its path in params['params']."""
     role = param_group(path)
+    if role == "other":
+        for prefix, group in V8_PREFIXES:
+            if path[0].startswith(prefix):
+                return group
     if role in ENCODER_ROLES:
         return "enc"
     if role == "core_experts":
@@ -58,8 +104,15 @@ def analysis_group(path):
 
 
 class ConflictAnalysis:
-    def __init__(self, policy, split_fn, awr_terms, robot_names, batch_sizes, loss_weights, a, seed, horizon):
+    def __init__(self, policy, split_fn, awr_terms, robot_names, batch_sizes, loss_weights, a, seed, horizon,
+                 route_policy=None, param_groups=None):
         self.policy, self.split_fn, self.awr_terms = policy, split_fn, awr_terms
+        # Policies with auto-named layers (EG): the group (one of GROUPS) of every top-level parameter name; the
+        # decoder group then also makes dec_exp.
+        self.param_groups = dict(param_groups) if param_groups else None
+        # Expert policy (morse/v8.py, not jitted): also record, per routing unit, the routing probabilities of every
+        # expert layer and how often each routed expert is selected, averaged over the analysis minibatches.
+        self.route_policy = route_policy
         self.robot_names = [str(n) for n in robot_names]
         self.batch_sizes = [int(b) for b in batch_sizes]
         self.loss_weights = [float(w) for w in loss_weights]
@@ -85,17 +138,27 @@ class ConflictAnalysis:
         if self._unravel is None:
             self._unravel = unravel
             leaves = jax.tree_util.tree_flatten_with_path(variables)[0]
-            slices, off = [], 0
+            slices, sub, off = [], [], 0
             for path, leaf in leaves:
                 keys = [getattr(k, "key", str(k)) for k in path]
                 keys = keys[1:] if keys and keys[0] == "params" else keys
                 size = int(np.prod(leaf.shape))
-                slices.append((off, off + size, analysis_group(keys)))
+                group = self.param_groups[keys[0]] if self.param_groups is not None else analysis_group(keys)
+                slices.append((off, off + size, group))
+                for name, member in SUBGROUPS.items():
+                    if name == "dec_exp" and self.param_groups is not None:
+                        ranges = _whole(size) if group == "dec" else []
+                    elif name in EXPERT_PARTS:
+                        ranges = member(keys, size, leaf.shape[0] if leaf.ndim else None)
+                    else:
+                        ranges = member(keys, size)
+                    sub.extend((off + lo, off + hi, name) for lo, hi in ranges)
                 off += size
             assert off == flat.shape[0]
-            self._slices = slices
+            self._slices, self._sub = slices, sub
             self.group_sizes = {g: sum(hi - lo for lo, hi, gg in slices if gg == g) for g in GROUPS[:-1]}
             self.group_sizes["all"] = int(flat.shape[0])
+            self.group_sizes.update({s: sum(hi - lo for lo, hi, ss in sub if ss == s) for s in SUBGROUPS})
         elif flat.shape[0] != self._slices[-1][1]:
             raise ValueError("the checkpoints have different parameter counts")
         return flat
@@ -105,7 +168,13 @@ class ConflictAnalysis:
         parts = {g: 0.0 for g in GROUPS[:-1]}
         for lo, hi, g in self._slices:
             parts[g] = parts[g] + jnp.einsum("vnp,vmp->vnm", A[:, :, lo:hi], B[:, :, lo:hi], precision=HI)
-        return jnp.stack([parts[g] for g in GROUPS[:-1]] + [sum(parts.values())])
+        subs = {s: 0.0 for s in SUBGROUPS}
+        for lo, hi, s in self._sub:
+            subs[s] = subs[s] + jnp.einsum("vnp,vmp->vnm", A[:, :, lo:hi], B[:, :, lo:hi], precision=HI)
+        zero = jnp.zeros((A.shape[0], A.shape[1], B.shape[1]), A.dtype)
+        parts = {g: zero if isinstance(v, float) else v for g, v in parts.items()}
+        return jnp.stack([parts[g] for g in GROUPS[:-1]] + [sum(parts.values())]
+                         + [subs[s] if not isinstance(subs[s], float) else zero for s in SUBGROUPS])
 
     # ---- joint units ----------------------------------------------------------------------------------------------
 
@@ -114,21 +183,59 @@ class ConflictAnalysis:
             return self._fns[("unit", r)]
         unravel, scale_w = self._unravel, self.loss_weights[r]
 
-        def losses(flat, extra, obs, act):
-            out = self.policy.apply(unravel(flat), *self.split_fn(obs, r), robot_id=r)
+        def losses(params, extra, obs, act):
+            out = self.policy.apply(params, *self.split_fn(obs, r), robot_id=r)
             exp_a, lp = self.awr_terms(out, obs, act, extra, r)
             return jnp.stack([-(exp_a * lp).mean(axis=0), -lp.mean(axis=0)]) * (scale_w / lp.shape[1])   # (2, n_joints)
 
+        def jac(params, extra, obs, act):
+            """(2, n_j, P) Jacobian in the order of the flat vector: taken with respect to the parameter tree and
+            concatenated once (differentiating through unravel pads every leaf to P and runs out of memory)."""
+            tree = jax.jacrev(losses)(params, extra, obs, act)
+            return jnp.concatenate([x.reshape(x.shape[:2] + (-1,)) for x in jax.tree_util.tree_leaves(tree)], axis=-1)
+
         def fn(flat, extra, obs, act):
-            return losses(flat, extra, obs, act), jax.jacrev(losses)(flat, extra, obs, act)           # (2, n_j), (2, n_j, P)
+            # The losses are means over the samples with per-sample weights, so the Jacobian of the batch is the mean of
+            # the Jacobians of equal chunks: chunks of at most CHUNK samples bound the memory of the expert policy.
+            params = unravel(flat)
+            n = obs.shape[0]
+            c = max(d for d in range(1, min(n, CHUNK) + 1) if n % d == 0)
+            oc, ac = obs.reshape((n // c, c) + obs.shape[1:]), act.reshape((n // c, c) + act.shape[1:])
+
+            def step(carry, xs):
+                o, a_ = xs
+                return (carry[0] + losses(params, extra, o, a_), carry[1] + jac(params, extra, o, a_)), None
+
+            l, j = losses(params, extra, oc[0], ac[0]), jac(params, extra, oc[0], ac[0])
+            if n // c > 1:
+                (l, j), _ = jax.lax.scan(step, (l, j), (oc[1:], ac[1:]))
+            return l / (n // c), j / (n // c)                                                        # (2, n_j), (2, n_j, P)
 
         self._fns[("unit", r)] = jax.jit(fn)
         return self._fns[("unit", r)]
+
+    def _route_fn(self, r):
+        """Routing record of robot r on a batch: per expert layer, the mean routing probabilities and the selection
+        frequency of every routed expert, per joint (joint-level layers) or per robot (body-level layers)."""
+        if ("route", r) in self._fns:
+            return self._fns[("route", r)]
+        from cross_embodiment_offline_rl.algorithms.morse.v8 import V8_ROUTING
+        unravel, pol = self._unravel, self.route_policy
+
+        def fn(flat, obs):
+            _, state = pol.apply(unravel(flat), *self.split_fn(obs, r), robot_id=r, mutable=[V8_ROUTING])
+            rec = state[V8_ROUTING]
+            return {layer: (rec[layer]["p"][0].mean(axis=0), (rec[layer]["w"][0] > 0).astype(jnp.float32).mean(axis=0))
+                    for layer in rec}
+
+        self._fns[("route", r)] = jax.jit(fn)
+        return self._fns[("route", r)]
 
     def _unit_part(self, flat, extra, dataset):
         K = self.n_batches
         half = [None, None]
         grams, unit_loss = [], 0.0
+        routes = {}
         for k in range(K):
             env_batches, _ = dataset.sample(jax.random.PRNGKey(self.seed * 1_000_003 + 271_828 + k), self.batch_sizes)
             losses, jacs = [], []
@@ -136,19 +243,36 @@ class ConflictAnalysis:
                 l, j = self._unit_fn(r)(flat, extra, jnp.asarray(b.observations), jnp.asarray(b.actions))
                 losses.append(l)
                 jacs.append(j)
-            J = jnp.concatenate(jacs, axis=1)                      # (2, U, P)
+                if self.route_policy is not None:
+                    for layer, (p, sel) in self._route_fn(r)(flat, jnp.asarray(b.observations)).items():
+                        acc = routes.setdefault(layer, [[None, None] for _ in self.robot_names])[r]
+                        acc[0] = np.asarray(p) / K if acc[0] is None else acc[0] + np.asarray(p) / K
+                        acc[1] = np.asarray(sel) / K if acc[1] is None else acc[1] + np.asarray(sel) / K
             if k == 0:
                 n_joints = [int(j.shape[1]) for j in jacs]
+            J = jnp.concatenate(jacs, axis=1)                      # (2, U, P)
+            del jacs
             unit_loss = unit_loss + np.asarray(jnp.concatenate(losses, axis=1)) / K
             grams.append(np.asarray(self._gram_jit(J, J)))
+            # The half sums stay on the host, so the device holds the gradients of one minibatch only.
             h = int(k >= K // 2)
-            half[h] = J if half[h] is None else half[h] + J
-        m1, m2 = half[0] / (K // 2), half[1] / (K // 2)
+            if half[h] is None:
+                half[h] = np.array(J)
+            else:
+                half[h] += np.asarray(J)
+            del J
+        m1, m2 = jnp.asarray(half[0] / (K // 2)), jnp.asarray(half[1] / (K // 2))
+        del half
         out = {"unit_gram": np.stack(grams).astype(np.float32),            # (K, groups, 2, U, U)
                "half_cross": np.asarray(self._gram_jit(m1, m2)), "half_same1": np.asarray(self._gram_jit(m1, m1)),
                "half_same2": np.asarray(self._gram_jit(m2, m2)), "unit_loss": unit_loss.astype(np.float32),
                "unit_robot": np.concatenate([np.full(n, r) for r, n in enumerate(n_joints)]),
                "unit_joint": np.concatenate([np.arange(n) for n in n_joints])}
+        for layer, per_robot in routes.items():
+            # joint-level layers: (n_joints, n_routed) per robot -> (U, n_routed); body-level: (n_routed,) -> (R, n_routed)
+            stack = np.concatenate if per_robot[0][0].ndim == 2 else np.stack
+            out[f"route_p_{layer}"] = stack([p for p, _ in per_robot]).astype(np.float32)
+            out[f"route_sel_{layer}"] = stack([s for _, s in per_robot]).astype(np.float32)
         return out
 
     # ---- trajectories -------------------------------------------------------------------------------------------------
@@ -220,9 +344,10 @@ class ConflictAnalysis:
             flat = self._bind(variables)
             result = {"robot_names": np.array(self.robot_names), "checkpoint": np.array(os.path.abspath(path)),
                       "n_batches": np.array(self.n_batches), "batch_sizes": np.array(self.batch_sizes),
-                      "groups": np.array(GROUPS), "variants": np.array(VARIANTS), "classes": np.array(CLASSES),
-                      "horizon": np.array(self.horizon), "min_return_frac": np.array(self.min_return),
-                      "group_sizes": np.array([self.group_sizes[g] for g in GROUPS])}
+                      "groups": np.array(GROUPS + tuple(SUBGROUPS)), "variants": np.array(VARIANTS),
+                      "classes": np.array(CLASSES), "horizon": np.array(self.horizon),
+                      "min_return_frac": np.array(self.min_return),
+                      "group_sizes": np.array([self.group_sizes[g] for g in GROUPS + tuple(SUBGROUPS)])}
             result.update(self._unit_part(flat, extra, dataset))
             result.update(self._episode_part(flat, extra, dataset, terminated, truncated))
             label = os.path.basename(os.path.normpath(path))

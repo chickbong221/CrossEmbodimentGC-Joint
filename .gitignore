@@ -11,6 +11,7 @@ runs/
 experiments/stderr*
 experiments/stdout*
 # large analysis dumps and scratch
-experiments/analysis/results/**/*.npz
+experiments/analysis/**/*.npz
+experiments/analysis/**/*.npy
 tmp/
 MORSE_HANDOFF.md

@@ -5,6 +5,7 @@ import psutil
 import logging
 import time
 from functools import partial
+from types import SimpleNamespace
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -346,7 +347,12 @@ class IQL:
         if self.v8:
             # morse_branch_from resumes a V8 run from a checkpoint of the same architecture: every leaf of the policy,
             # critics and optimizer state must be restored exactly (checked below and in check_branch).
-            unsupported = {k: getattr(a, k) for k in ("morse_probe_at", "morse_ckpt_analysis") if getattr(a, k)}
+            # Checkpoint analysis of a V8 policy: only the gradient-conflict analysis (with routing records).
+            conflict_only = (int(getattr(a, "morse_conflict_batches", 0)) > 0 and int(a.morse_ckpt_batches) == 0
+                             and not any(getattr(a, k, 0) for k in ("morse_ckpt_eval", "morse_ckpt_eval_noise",
+                                                                    "morse_coord_out", "morse_ckpt_grads", "morse_ckpt_var")))
+            unsupported = {k: getattr(a, k) for k in ("morse_probe_at", "morse_ckpt_analysis") if getattr(a, k)
+                           and not (k == "morse_ckpt_analysis" and conflict_only)}
             if unsupported or self.variance_mode != "original" or self.freeze_core or a.morse_router_only:
                 raise ValueError(f"morse_arch=v8 does not support {unsupported or 'variance modes, core freezing or router-only updates'}")
             groups, n_groups = None, 0
@@ -372,13 +378,19 @@ class IQL:
         # Checkpoint analysis instead of training (morse/ckpt_analysis.py, morse/coordination.py).
         self.ckpt_analysis = self.coord_dump = self.conflict = None
         if a.morse_ckpt_analysis:
-            self.ckpt_analysis = CheckpointAnalysis(get_morse_policy(config, capture=True), split_obs, awr_terms,
-                                                    list(self.robot_types_list), self.env_batch_sizes, a, self.seed,
-                                                    loss_fn=policy_loss)
+            if self.v8:
+                # Only the checkpoint list is needed (the V8 policy runs the gradient-conflict analysis alone).
+                self.ckpt_analysis = SimpleNamespace(
+                    paths=[p.strip() for p in str(a.morse_ckpt_analysis).split(",") if p.strip()])
+            else:
+                self.ckpt_analysis = CheckpointAnalysis(get_morse_policy(config, capture=True), split_obs, awr_terms,
+                                                        list(self.robot_types_list), self.env_batch_sizes, a, self.seed,
+                                                        loss_fn=policy_loss)
             if int(getattr(a, "morse_conflict_batches", 0)) > 0:
                 self.conflict = ConflictAnalysis(self.policy, split_obs, awr_terms, list(self.robot_types_list),
                                                  self.env_batch_sizes, self.robot_loss_weights, a, self.seed,
-                                                 max(self.env.call("horizon")))
+                                                 max(self.env.call("horizon")),
+                                                 route_policy=get_v8_policy(config) if self.v8 else None)
             if a.morse_coord_out:
                 self.coord_dump = CoordinationDump(self.policy, split_obs, list(self.robot_types_list),
                                                    [observation_name_to_ids[i] for i in self.env_ids[:-1]],
